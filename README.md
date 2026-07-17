@@ -2,6 +2,8 @@
 
 A simple, safe, and lightweight GUI tool for backing up and restoring your Automobilista 2 (AMS2) Custom AI Driver files. Built for sim racers who use career mode apps and want to protect their custom livery/driver XML files from being overwritten.
 
+<img width="1920" height="1032" alt="Screenshot 2026-07-18 003930" src="https://github.com/user-attachments/assets/f6a00b47-8114-4b14-96a6-6260388f22c0" />
+
 ---
 
 ## What It Does
