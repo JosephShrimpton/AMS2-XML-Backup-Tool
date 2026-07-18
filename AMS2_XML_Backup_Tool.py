@@ -716,6 +716,22 @@ class AMS2XMLBackupTool:
         tk.Label(list_card, text="📋 Available Backups (double-click to preview)", 
                 bg=BG_CARD, fg=ACCENT, font=("Segoe UI", 11, "bold")).pack(anchor=tk.W, pady=(0, 6))
 
+        # Delete button row (inside backup list card)
+        delete_btn_frame = tk.Frame(list_card, bg=BG_CARD)
+        delete_btn_frame.pack(fill=tk.X, pady=(0, 6))
+
+        self.selected_backup_label = tk.Label(delete_btn_frame, text="No backup selected",
+                                                bg=BG_CARD, fg=TEXT_SECONDARY,
+                                                font=("Segoe UI", 9))
+        self.selected_backup_label.pack(side=tk.LEFT)
+
+        self.delete_card_btn = tk.Button(delete_btn_frame, text="🗑 Delete This Backup",
+                                          command=self.run_delete_backup, state=tk.DISABLED,
+                                          bg="#8B0000", fg=TEXT_PRIMARY, font=("Segoe UI", 9, "bold"),
+                                          relief=tk.FLAT, padx=15, pady=5, cursor="hand2")
+        self.delete_card_btn.pack(side=tk.RIGHT)
+
+
         columns = ("date", "files", "size", "verified", "path")
         self.tree = ttk.Treeview(list_card, columns=columns, show="headings", height=7)
         self.tree.heading("date", text="Backup Date")
@@ -735,6 +751,14 @@ class AMS2XMLBackupTool:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind("<Double-1>", self.on_tree_double_click)
 
+        # Context menu for right-click delete
+        self.tree_context_menu = tk.Menu(self.tree, tearoff=0, bg=BG_CARD, fg=TEXT_PRIMARY,
+                                         font=("Segoe UI", 10), activebackground=ACCENT,
+                                         activeforeground=BG_DARK)
+        self.tree_context_menu.add_command(label="🗑 Delete Backup", command=self.run_delete_backup)
+        self.tree.bind("<Button-3>", self.show_context_menu)
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+
         # ===== LOG =====
         log_frame = tk.LabelFrame(main_frame, text=" Status Log ", bg=BG_DARK, fg=ACCENT,
                                  font=("Segoe UI", 10, "bold"), padx=10, pady=10)
@@ -750,7 +774,7 @@ class AMS2XMLBackupTool:
         footer = tk.Frame(main_frame, bg=BG_DARK, padx=5, pady=5)
         footer.pack(fill=tk.X, pady=(5, 0))
 
-        tk.Label(footer, text="v1.0", bg=BG_DARK, fg=TEXT_SECONDARY,
+        tk.Label(footer, text="v1.1", bg=BG_DARK, fg=TEXT_SECONDARY,
                 font=("Segoe UI", 9)).pack(side=tk.RIGHT)
 
         self.log("🏁 AMS2 XML Backup Tool started.")
@@ -1155,6 +1179,123 @@ class AMS2XMLBackupTool:
             else:
                 return None
         return path
+
+    # ===== DELETE BACKUP =====
+    def show_context_menu(self, event):
+        """Show right-click context menu on treeview."""
+        # Select the item under cursor
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.tree.selection_set(item)
+            self.tree_context_menu.post(event.x_root, event.y_root)
+
+    def on_tree_select(self, event=None):
+        """Enable/disable delete card button based on tree selection."""
+        selected = self.tree.selection()
+        if selected:
+            backup_name = self.tree.item(selected[0])["values"][0]
+            self.selected_backup_label.config(text=f"Selected: {backup_name}", fg=TEXT_PRIMARY)
+            self.delete_card_btn.config(state=tk.NORMAL)
+        else:
+            self.selected_backup_label.config(text="No backup selected", fg=TEXT_SECONDARY)
+            self.delete_card_btn.config(state=tk.DISABLED)
+
+    def _is_valid_backup_folder(self, path: Path) -> bool:
+        """Ensure we only delete actual backup folders, not random directories."""
+        return (
+            path.exists()
+            and path.is_dir()
+            and path.name.startswith("CustomAIDrivers_backup_")
+            and (path / "_backup_manifest.json").exists()
+        )
+
+    def run_delete_backup(self):
+        """Validate selection and show confirmation before deleting."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("Select a Backup", "Please select a backup to delete.")
+            return
+
+        backup_path = Path(self.tree.item(selected[0])["values"][4])
+
+        # Safety validation
+        if not self._is_valid_backup_folder(backup_path):
+            messagebox.showerror("Invalid Backup",
+                                f"This does not appear to be a valid backup folder:\n\n"
+                                f"{backup_path}\n\n"
+                                f"Deletion cancelled for safety.")
+            self.log(f"✗ DELETE BLOCKED: Invalid backup folder {backup_path.name}")
+            return
+
+        # Gather info for confirmation dialog
+        try:
+            xml_files = scan_xml_files(backup_path)
+            file_count = len(xml_files)
+            total_size = sum(f.stat().st_size for f in xml_files)
+        except Exception:
+            file_count = 0
+            total_size = 0
+
+        # Show confirmation dialog
+        result = messagebox.askyesno(
+            "⚠️ Confirm Delete Backup",
+            f"You are about to delete this backup:\n\n"
+            f"Name: {backup_path.name}\n"
+            f"Files: {file_count}\n"
+            f"Size: {self.format_size(total_size)}\n"
+            f"Location:\n{backup_path}\n\n"
+            f"✅ ONLY this folder will be deleted.\n"
+            f"✅ Other backups in the same location are SAFE.\n"
+            f"✅ Your original CustomAIDrivers files are NOT affected.\n\n"
+            f"⚠️ This action cannot be undone.\n\n"
+            f"Are you sure you want to delete this backup?"
+        )
+
+        if result:
+            thread = threading.Thread(target=self._do_delete_backup, args=(backup_path, file_count, total_size))
+            thread.daemon = True
+            thread.start()
+
+    def _do_delete_backup(self, backup_path: Path, file_count: int, total_size: int):
+        """Execute deletion of a single backup folder."""
+        self.set_buttons_state(tk.DISABLED)
+        self.set_status(f"Deleting backup: {backup_path.name}...", WARN_YELLOW)
+        self.progress["value"] = 30
+
+        try:
+            # Final safety check before deletion
+            if not self._is_valid_backup_folder(backup_path):
+                raise ValueError("Backup folder validation failed before deletion.")
+
+            shutil.rmtree(backup_path)
+
+            self.progress["value"] = 100
+            self.set_status(f"🗑 Deleted backup: {backup_path.name}", ACCENT)
+            self.log(f"🗑 DELETED BACKUP: {backup_path.name}")
+            self.log(f"  Files removed: {file_count}")
+            self.log(f"  Size freed: {self.format_size(total_size)}")
+            self.log(f"  Location: {backup_path}")
+            self.log(f"  ✅ Other backups are untouched.")
+
+            messagebox.showinfo("Backup Deleted",
+                               f"🗑 Backup deleted successfully.\n\n"
+                               f"Name: {backup_path.name}\n"
+                               f"Files: {file_count}\n"
+                               f"Size: {self.format_size(total_size)}\n\n"
+                               f"Other backups remain safe.")
+
+            # Refresh the list and clear selection
+            self.scan_backups()
+            self.selected_backup_label.config(text="No backup selected", fg=TEXT_SECONDARY)
+            self.delete_card_btn.config(state=tk.DISABLED)
+
+        except Exception as e:
+            self.set_status(f"✗ Delete failed: {str(e)}", ERROR_RED)
+            self.log(f"✗ DELETE ERROR: {str(e)}")
+            messagebox.showerror("Delete Failed", str(e))
+        finally:
+            self.set_buttons_state(tk.NORMAL)
+            self.progress["value"] = 0
 
     def on_tree_double_click(self, event):
         self.preview_restore()
